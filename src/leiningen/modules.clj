@@ -150,12 +150,18 @@ by including the :checkouts flag:
 
   $ lein modules :checkouts
 
-And you can limit which modules run the task with the :dirs option:
+You can limit which modules run the task with the :dirs option:
 
   $ lein modules :dirs core,web install
 
 Delimited by either comma or colon, this list of relative paths
 will override the [:modules :dirs] config in project.clj
+
+You can list the modules by not providing a command, or providing
+the :list flag. When listing modules, the :quiet flag limits output
+to a newline delimited list of namespaces.
+
+  $ lein modules :quiet :list
 
 Accepts '-q', '--quiet' and ':quiet' to suppress non-subprocess output."
   [project & args]
@@ -171,7 +177,9 @@ Accepts '-q', '--quiet' and ':quiet' to suppress non-subprocess output."
                   (assoc-in [:modules :dirs] dirs)
                   (vary-meta assoc-in [:without-profiles :modules :dirs] dirs))
                 (drop 2 args)))
-    nil (print-modules opts (ordered-builds project))
+
+    ":list" (print-modules opts (ordered-builds project))
+    nil     (print-modules opts (ordered-builds project))
     (let [modules (ordered-builds project)
           profiles (compressed-profiles project)
           args (cli-with-profiles profiles args)
