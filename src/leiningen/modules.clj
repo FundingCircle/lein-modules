@@ -1,14 +1,16 @@
 (ns leiningen.modules
-  (:require [leiningen.core.project :as prj]
-            [leiningen.core.main :as main]
-            [leiningen.core.eval :as eval]
-            [leiningen.core.utils :as utils]
-            [clojure.java.io :as io]
-            [clojure.string :as s])
-  (:use [lein-modules.inheritance :only (inherit)]
-        [lein-modules.common      :only (parent with-profiles read-project)]
-        [lein-modules.compression :only (compressed-profiles)]
-        [cuddlefish.core :only (changed-files)]))
+  (:require [clojure.java.io :as io]
+            [clojure.string :as s]
+            [lein-modules
+             [inheritance :refer [inherit]]
+             [common :refer [parent with-profiles read-project]]
+             [compression :refer [compressed-profiles]]]
+            [cuddlefish.core :refer [changed-files]]
+            [leiningen.core
+             [project :as prj]
+             [main :as main]
+             [eval :as eval]
+             [utils :as utils]]))
 
 (defn child?
   "Return true if child is an immediate descendant of project"
@@ -19,25 +21,33 @@
   "A tree seq on java.io.Files that aren't symlinks"
   [dir]
   (tree-seq
-    (fn [^java.io.File f] (and (.isDirectory f) (not (utils/symlink? f))))
-    (fn [^java.io.File d] (seq (.listFiles d)))
-    dir))
+   (fn [^java.io.File f]
+     (and (.isDirectory f)
+          (not (utils/symlink? f))))
+   (fn [^java.io.File d]
+     (seq (.listFiles d)))
+   dir))
 
 (defn children
   "Return the child maps for a project according to its active profiles"
   [project]
   (if-let [dirs (-> project :modules :dirs)]
     (remove nil?
-      (map (comp #(try (read-project %) (catch Exception e (println (.getMessage e))))
-             (memfn getCanonicalPath)
-             #(io/file (:root project) % "project.clj"))
-        dirs))
+            (map (comp #(try (read-project %)
+                             (catch Exception e
+                               (println (.getMessage e))))
+                       (memfn getCanonicalPath)
+                       #(io/file (:root project) % "project.clj"))
+                 dirs))
     (->> (file-seq-sans-symlinks (io/file (:root project)))
-      (filter #(= "project.clj" (.getName %)))
-      (remove #(= (:root project) (.getParent %)))
-      (map (comp #(try (read-project %) (catch Exception e (println (.getMessage e)))) str))
-      (remove nil?)
-      (filter #(child? project (with-profiles % (compressed-profiles project)))))))
+         (filter #(= "project.clj" (.getName %)))
+         (remove #(= (:root project) (.getParent %)))
+         (keep (comp #(try (read-project %)
+                           (catch Exception e
+                             (println (.getMessage e))))
+                     str))
+         (filter #(child? project
+                          (with-profiles % (compressed-profiles project)))))))
 
 (defn id
   "Returns fully-qualified symbol identifier for project"
@@ -48,37 +58,52 @@
 (defn progeny
   "Recursively return the project's children in a map keyed by id"
   ([project]
-     (progeny project (compressed-profiles project)))
+   (progeny project (compressed-profiles project)))
   ([project profiles]
-     (let [kids (children (with-profiles project profiles))]
-       (apply merge
-         (into {} (map (juxt id identity) kids))
-         (->> kids
-           (remove #(= (:root project) (:root %))) ; in case "." in :dirs
-           (map #(progeny % profiles)))))))
+   (let [kids (children (with-profiles project profiles))]
+     (apply merge
+            (into {} (map (juxt id identity) kids))
+            (->> kids
+                 (remove #(= (:root project) (:root %))) ; in case "." in :dirs
+                 (map #(progeny % profiles)))))))
 
 (defn interdependence
   "Turn a progeny map (symbols to projects) into a mapping of projects
   to their dependent projects"
   [pm]
   (let [deps (fn [p] (->> (:dependencies p)
-                      (map first)
-                      (map pm)
-                      (remove nil?)))]
+                          (map first)
+                          (map pm)
+                          (remove nil?)))]
     (reduce (fn [acc [_ p]] (assoc acc p (deps p))) {} pm)))
 
-(defn topological-sort [deps]
-  "A topological sort of a mapping of graph nodes to their edges (credit Jon Harrop)"
-  (loop [deps deps, resolved #{}, result []]
+(defn topological-sort
+  "A topological sort of a mapping of graph nodes to their edges"
+  {:authors ["Jon Harrop"]}
+  [deps]
+  (loop [deps     deps
+         resolved #{}
+         result   []]
     (if (empty? deps)
       result
-      (if-let [dep (some (fn [[k v]] (if (empty? (remove resolved v)) k)) deps)]
-        (recur (dissoc deps dep) (conj resolved dep) (conj result dep))
-        (throw (Exception. (apply str "Cyclic dependency: " (interpose ", " (map :name (keys deps))))))))))
+      (if-let [dep (some (fn [[k v]]
+                           (when (empty? (remove resolved v))
+                             k))
+                         deps)]
+        (recur (dissoc deps dep)
+               (conj resolved dep)
+               (conj result dep))
+        (throw (Exception. (apply str "Cyclic dependency: "
+                                  (interpose ", " (map :name (keys deps))))))))))
 
 (def ordered-builds
   "Sort a representation of interdependent projects topologically"
   (comp topological-sort interdependence progeny))
+
+(defn invalidated-builds
+
+  [project from-ref to-ref]
+  (let [progeny (progeny project)]))
 
 (defn create-checkouts
   "Create checkout symlinks for interdependent projects"
@@ -104,11 +129,11 @@
   (if (some #{"with-profile" "with-profiles"} args)
     args
     (with-meta (concat
-                 ["with-profile" (->> profiles
-                                   (map name)
-                                   (interpose ",")
-                                   (apply str))]
-                 args)
+                ["with-profile" (->> profiles
+                                     (map name)
+                                     (interpose ",")
+                                     (apply str))]
+                args)
       {:profiles-added true})))
 
 (defn dump-profiles
@@ -121,7 +146,7 @@
   "If running in 'quiet' mode, only prints the located modules.
 
   Otherwise prints a more human-formatted modules list."
-  
+
   [{:keys [quiet?]} modules]
   (if (empty? modules)
     (if-not quiet?
@@ -141,42 +166,42 @@
 (defn modules
   "Run a task for all related projects in dependency order.
 
-Any task (along with any arguments) will be run in this project and
-then each of this project's child modules. For example:
+  Any task (along with any arguments) will be run in this project and
+  then each of this project's child modules. For example:
 
   $ lein modules install
   $ lein modules deps :tree
   $ lein modules do clean, test
   $ lein modules analias
 
-You can create 'checkout dependencies' for all interdependent modules
-by including the :checkouts flag:
+  You can create 'checkout dependencies' for all interdependent modules
+  by including the :checkouts flag:
 
   $ lein modules :checkouts
 
-You can limit which modules run the task with the :dirs option:
+  You can limit which modules run the task with the :dirs option:
 
   $ lein modules :dirs core,web install
 
-Delimited by either comma or colon, this list of relative paths
-will override the [:modules :dirs] config in project.clj
+  Delimited by either comma or colon, this list of relative paths
+  will override the [:modules :dirs] config in project.clj
 
-You can list the modules by not providing a command, or providing
-the :list flag. When listing modules, the :quiet flag limits output
-to a newline delimited list of namespaces.
+  You can list the modules by not providing a command, or providing
+  the :list flag. When listing modules, the :quiet flag limits output
+  to a newline delimited list of namespaces.
 
   $ lein modules :quiet :list
 
-Accepts '-q', '--quiet' and ':quiet' to suppress non-subprocess output.
-
-You can introspect your git history to run the selected command only
-on changed modules and their transitive dependees.
-
+  Accepts '-q', '--quiet' and ':quiet' to suppress non-subprocess output.
+  
+  You can introspect your git history to run the selected command only
+  on changed modules and their transitive dependees.
+  
   $ lein modules :changed origin/master HEAD test
 
-will figure out what modules have hand changes, and run the tests on
-any module which has changed, or which depends on a changed
-module. If the root project.clj has changed, all tests will run."
+  will figure out what modules have hand changes, and run the tests on
+  any module which has changed, or which depends on a changed
+  module. If the root project.clj has changed, all tests will run."
   [project & args]
   (let [[quiet? args] ((juxt some remove) #{"-q" "--quiet" ":quiet"} args)
         quiet? (or quiet? (-> project :modules :quiet))
@@ -209,14 +234,17 @@ module. If the root project.clj has changed, all tests will run."
         (print-modules opts modules))
       (doseq [project modules]
         (when-not quiet?
-          (println "------------------------------------------------------------------------")
-          (println " Building" (:name project) (:version project) (dump-profiles args))
-          (println "------------------------------------------------------------------------"))
-        (if-let [cmd (get-in project [:modules :subprocess] subprocess)]
-          (binding [eval/*dir* (:root project)]
-            (let [exit-code (apply eval/sh (cons cmd args))]
-              (when (pos? exit-code)
-                (throw (ex-info "Subprocess failed" {:exit-code exit-code})))))
-          (let [project (prj/init-project project)
-                task (main/lookup-alias (first args) project)]
-            (main/apply-task task project (rest args)))))))))
+          (print-modules opts modules))
+        (doseq [project modules]
+          (when-not quiet?
+            (println "------------------------------------------------------------------------")
+            (println " Building" (:name project) (:version project) (dump-profiles args))
+            (println "------------------------------------------------------------------------"))
+          (if-let [cmd (get-in project [:modules :subprocess] subprocess)]
+            (binding [eval/*dir* (:root project)]
+              (let [exit-code (apply eval/sh (cons cmd args))]
+                (when (pos? exit-code)
+                  (throw (ex-info "Subprocess failed" {:exit-code exit-code})))))
+            (let [project (prj/init-project project)
+                  task (main/lookup-alias (first args) project)]
+              (main/apply-task task project (rest args)))))))))
