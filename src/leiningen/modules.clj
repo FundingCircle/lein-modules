@@ -105,7 +105,12 @@
   directories (Files) to a sets of project symbols. This enables us to
   localize file changes to impacted projects."
   [pm]
-  nil)
+  (reduce (fn [acc [sym proj]]
+            (reduce (fn [acc root]
+                      (update acc root (fnil conj #{}) root))
+                    acc (cons (:root proj)
+                              (mapcat proj [:source-paths :resource-paths]))))
+          {} pm))
 
 (defn impacted
   "Transforms a \"roots\" map of Files to sets of project symbols and a
