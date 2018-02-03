@@ -10,7 +10,8 @@
              [project :as prj]
              [main :as main]
              [eval :as eval]
-             [utils :as utils]]))
+             [utils :as utils]])
+  (:import [java.io File]))
 
 (defn child?
   "Return true if child is an immediate descendant of project"
@@ -21,10 +22,10 @@
   "A tree seq on java.io.Files that aren't symlinks"
   [dir]
   (tree-seq
-   (fn [^java.io.File f]
+   (fn [^File f]
      (and (.isDirectory f)
           (not (utils/symlink? f))))
-   (fn [^java.io.File d]
+   (fn [^File d]
      (seq (.listFiles d)))
    dir))
 
@@ -112,20 +113,31 @@
                               (mapcat proj [:source-paths :resource-paths]))))
           {} pm))
 
+(defn parent-dirs [f]
+  (if-let [parent (.getParentFile ^File f)]
+    (cons parent (lazy-seq (parent-dirs parent)))))
+
 (defn impacted
   "Transforms a \"roots\" map of Files to sets of project symbols and a
   \"changed\" map of root-relative file paths to git change
   information into a single set of project symbols which have had
   DIRECT source change."
   [roots changed]
-  nil)
+  (->> (for [[root projects] roots
+             :let [root (io/file "." root)]
+             [f status] changed
+             parent (parent-dirs (io/file "." f))
+             :when (= parent root)
+             p projects]
+         p)
+       set))
 
 (defn invalidated-builds
   "Check status information, computing and returning a topsort of the "
   [project since to]
   (let [pm (progeny project)
         roots (roots pm)
-        changed (changed {:git "git"} since to)
+        changed (changed-files {:git "git"} since to)
         impacted (impacted roots changed)
 
         ;; Get a map from projects to their deps
