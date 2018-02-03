@@ -100,10 +100,50 @@
   "Sort a representation of interdependent projects topologically"
   (comp topological-sort interdependence progeny))
 
-(defn invalidated-builds
+(defn roots
+  "Transforms a \"progeny\" map of symbols to project maps to a map of
+  directories (Files) to a sets of project symbols. This enables us to
+  localize file changes to impacted projects."
+  [pm]
+  nil)
 
-  [project from-ref to-ref]
-  (let [progeny (progeny project)]))
+(defn impacted
+  "Transforms a \"roots\" map of Files to sets of project symbols and a
+  \"changed\" map of root-relative file paths to git change
+  information into a single set of project symbols which have had
+  DIRECT source change."
+  [roots changed]
+  nil)
+
+(defn invalidated-builds
+  "Check status information, computing and returning a topsort of the "
+  [project since to]
+  (let [pm (progeny project)
+        roots (roots pm)
+        changed (changed {:git "git"} since to)
+        impacted (impacted roots changed)
+
+        ;; Get a map from projects to their deps
+        interdependence (interdependence pm)
+
+        ;; Invert that to a map from projects to their dependees
+        dependees (reduce (fn [acc [p deps]]
+                            (reduce #(update %1 %2 (fnil conj #{}) p)
+                                    acc deps))
+                          {} interdependence)
+
+        ;; Compute the closure of impact over dependent projects using
+        ;; the dependees map.
+        impacted (loop [impacted impacted]
+                   (let [impacted* (set (mapcat dependees impacted))]
+                     (if-not (= impacted impacted*)
+                       (recur impacted*)
+                       impacted*)))]
+
+    ;; Select and topsort the impacted targets.
+    (->> impacted
+         (select-keys interdependence)
+         (topological-sort))))
 
 (defn create-checkouts
   "Create checkout symlinks for interdependent projects"
