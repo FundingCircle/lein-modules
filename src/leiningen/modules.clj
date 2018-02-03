@@ -7,7 +7,8 @@
             [clojure.string :as s])
   (:use [lein-modules.inheritance :only (inherit)]
         [lein-modules.common      :only (parent with-profiles read-project)]
-        [lein-modules.compression :only (compressed-profiles)]))
+        [lein-modules.compression :only (compressed-profiles)]
+        [cuddlefish.core :only (changed-files)]))
 
 (defn child?
   "Return true if child is an immediate descendant of project"
@@ -166,7 +167,16 @@ to a newline delimited list of namespaces.
 
   $ lein modules :quiet :list
 
-Accepts '-q', '--quiet' and ':quiet' to suppress non-subprocess output."
+Accepts '-q', '--quiet' and ':quiet' to suppress non-subprocess output.
+
+You can introspect your git history to run the selected command only
+on changed modules and their transitive dependees.
+
+  $ lein modules :changed origin/master HEAD test
+
+will figure out what modules have hand changes, and run the tests on
+any module which has changed, or which depends on a changed
+module. If the root project.clj has changed, all tests will run."
   [project & args]
   (let [[quiet? args] ((juxt some remove) #{"-q" "--quiet" ":quiet"} args)
         quiet? (or quiet? (-> project :modules :quiet))
@@ -182,7 +192,11 @@ Accepts '-q', '--quiet' and ':quiet' to suppress non-subprocess output."
                     (assoc-in [:modules :quiet] quiet?)
                   (vary-meta assoc-in [:without-profiles :modules :dirs] dirs))
                 (drop 2 args)))
-
+    ":changed" (let [[_changed since to & args'] args]
+                 ;; FIXME (reid.mckenzie 2018-02-02):
+                 ;;   this needs to do at least the whole ordered builds
+                 ;;   dance, generate dirs sectors and recur.
+                 nil)
     ":list" (print-modules opts (ordered-builds project))
     nil     (print-modules opts (ordered-builds project))
     (let [modules (ordered-builds project)

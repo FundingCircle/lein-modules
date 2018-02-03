@@ -8,6 +8,7 @@
   :eval-in-leiningen true
 
   :plugins [[me.arrdem/lein-git-version "2.0.5"]]
+  :dependencies [[me.arrdem/cuddlefish "0.1.0"]]
 
   :deploy-repositories {"releases" :clojars}
 
