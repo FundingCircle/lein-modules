@@ -69,14 +69,27 @@
                  (map #(progeny % profiles)))))))
 
 (defn interdependence
-  "Turn a progeny map (symbols to projects) into a mapping of projects
-  to their dependent projects"
+  "Turn a progeny map (symbols to projects) into a mapping of project
+  maps to their dependent project maps."
   [pm]
-  (let [deps (fn [p] (->> (:dependencies p)
-                          (map first)
-                          (map pm)
-                          (remove nil?)))]
-    (reduce (fn [acc [_ p]] (assoc acc p (deps p))) {} pm)))
+  (reduce (fn [acc p]
+            (assoc acc p
+                   (->> (:dependencies p)
+                        (map first)
+                        (keep pm))))
+          {} (vals pm)))
+
+(defn id-interdependence
+  "Turn a progeny map (symbols to projects) into a map from projects to
+  the names of to their dependent projects (symbols to set of symbols)"
+  [pm]
+  (reduce (fn [acc p]
+            (assoc acc (id p)
+                   (->> (:dependencies p)
+                        (map first)
+                        (keep pm)
+                        (map id))))
+          {} (vals pm)))
 
 (defn topological-sort
   "A topological sort of a mapping of graph nodes to their edges"
@@ -124,46 +137,54 @@
   DIRECT source change."
   [roots changed]
   (->> (for [[root projects] roots
-             :let [root (io/file "." root)]
+             :let [root (.getCanonicalFile (io/file root))]
              [f status] changed
-             parent (parent-dirs (io/file "." f))
+             parent (parent-dirs (.getCanonicalFile (io/file f)))
              :when (= parent root)
              p projects]
          p)
        set))
 
+(defn select-by-id [pm ids]
+  (let [names (set (map (comp symbol name) ids))
+        ids   (set ids)]
+    (->> (for [[name m :as v] pm
+               :when (or (names name) (ids name))]
+           pm)
+         (into {}))))
+
 (defn only
-  "Given a project and a list of targets, only build those targets and their dependencies."
+  "Given a project and a list of targets, only build those targets."
   [project targets]
   (let [pm (progeny project)
-        interdependence (interdependence pm)]
-    (topological-sort (select-keys interdependence targets))))
+        selected-progeny (select-by-id pm targets)
+        idep (id-interdependence selected-progeny)
+        build (topological-sort idep)]
+    (println "DEBUG] selected-progeny:" (keys selected-progeny))
+    (println "DEBUG] idep:" (pr-str idep))
+    (println "DEBUG] build:" build)
+    (map pm build)))
 
 (defn invalidated-builds
-  "Check status information, computing and returning a topsort of the "
+  "Check status information, computing and returning a topsort of the
+  directly and transitively invalidated targets."
   [project since to]
   (let [pm (progeny project)
         roots (roots pm)
         changed (changed-files {:git "git"} since to)
-        impacted (impacted roots changed)
-
-        ;; Get a map from projects to their deps
-        interdependence (interdependence pm)
-
-        ;; Invert that to a map from projects to their dependees
+        targets (impacted roots changed)
         dependees (reduce (fn [acc [p deps]]
                             (reduce #(update %1 %2 (fnil conj #{}) p)
                                     acc deps))
-                          {} interdependence)
-
+                          {} id-interdependence)
         ;; Compute the closure of impact over dependent projects using
         ;; the dependees map.
-        impacted (loop [impacted impacted]
-                   (let [impacted* (set (mapcat dependees impacted))]
-                     (if-not (= impacted impacted*)
-                       (recur impacted*)
-                       impacted*)))]
-
+        targets (loop [targets targets]
+                  (println "DEBUG]" targets)
+                   (let [targets* (set (mapcat dependees targets))]
+                     (if-not (= targets targets*)
+                       (recur targets*)
+                       targets)))]
     ;; Select and topsort the impacted targets.
     (only project impacted)))
 
@@ -277,6 +298,7 @@
           quiet? (or quiet? (-> project :modules :quiet))
           modules (or (-> project :modules :modules) (ordered-builds project))
           {:keys [quiet?] :as opts} {:quiet? (boolean quiet?)}]
+      (println "DEBUG] modules:" (map id modules))
       (condp contains? (first args)
         #{":checkouts"}
         (do (checkout-dependencies project)
@@ -301,7 +323,9 @@
                         (only project))]
           (when (empty? only)
             (binding [*out* *err*]
-              (println "Warning: no targets found for selectors! '%s'" targets)))
+              (printf "Warning: no targets found for selectors! '%s'\n" targets)))
+          (when only
+            (println "DEBUG] only:" (map id only)))
           (recur (-> project
                      (assoc-in [:modules :quiet] quiet?)
                      (assoc-in [:modules :modules] only))
@@ -316,7 +340,7 @@
                  args'))
 
         #{":list" nil}
-        (print-modules opts (ordered-builds project))
+        (print-modules opts modules)
 
         (let [profiles (compressed-profiles project)
               args (cli-with-profiles profiles args)
@@ -326,8 +350,6 @@
           (when-not quiet?
             (print-modules opts modules))
           (doseq [project modules]
-            (when-not quiet?
-              (print-modules opts modules))
             (doseq [project modules]
               (when-not quiet?
                 (println "------------------------------------------------------------------------")
