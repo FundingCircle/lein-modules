@@ -132,6 +132,13 @@
          p)
        set))
 
+(defn only
+  "Given a project and a list of targets, only build those targets and their dependencies."
+  [project targets]
+  (let [pm (progeny project)
+        interdependence (interdependence pm)]
+    (topological-sort (select-keys interdependence targets))))
+
 (defn invalidated-builds
   "Check status information, computing and returning a topsort of the "
   [project since to]
@@ -158,9 +165,7 @@
                        impacted*)))]
 
     ;; Select and topsort the impacted targets.
-    (->> impacted
-         (select-keys interdependence)
-         (topological-sort))))
+    (only project impacted)))
 
 (defn create-checkouts
   "Create checkout symlinks for interdependent projects"
@@ -240,8 +245,14 @@
 
   $ lein modules :dirs core,web install
 
-  Delimited by either comma or colon, this list of relative paths
-  will override the [:modules :dirs] config in project.clj
+  Delimited by either comma or colon, this list of relative paths will
+  override the [:modules :dirs] config in project.clj. Transitive
+  dependencies of listed directories WILL NOT be run unless listed.
+
+  Alternatively, you can run a task against one or more modules and
+  their dependencies in normal topsort order using the :only option:
+
+  $ lein modules :only com.foo/bar,com.foo/baz test
 
   You can list the modules by not providing a command, or providing
   the :list flag. When listing modules, the :quiet flag limits output
@@ -253,55 +264,80 @@
   
   You can introspect your git history to run the selected command only
   on changed modules and their transitive dependees.
-  
+
   $ lein modules :changed origin/master HEAD test
 
   will figure out what modules have hand changes, and run the tests on
   any module which has changed, or which depends on a changed
   module. If the root project.clj has changed, all tests will run."
   [project & args]
-  (let [[quiet? args] ((juxt some remove) #{"-q" "--quiet" ":quiet"} args)
-        quiet? (or quiet? (-> project :modules :quiet))
-        {:keys [quiet?] :as opts} {:quiet? (boolean quiet?)}]
-    (condp = (first args)
-    ":checkouts" (do
-                   (checkout-dependencies project)
-                   (apply modules project (remove #{":checkouts"} args)))
-    ":dirs" (let [dirs (s/split (second args) #"[:,]")]
-              (apply modules
-                (-> project
-                    (assoc-in [:modules :dirs] dirs)
-                    (assoc-in [:modules :quiet] quiet?)
-                  (vary-meta assoc-in [:without-profiles :modules :dirs] dirs))
-                (drop 2 args)))
-    ":changed" (let [[_changed since to & args'] args]
-                 ;; FIXME (reid.mckenzie 2018-02-02):
-                 ;;   this needs to do at least the whole ordered builds
-                 ;;   dance, generate dirs sectors and recur.
-                 nil)
-    ":list" (print-modules opts (ordered-builds project))
-    nil     (print-modules opts (ordered-builds project))
-    (let [modules (ordered-builds project)
-          profiles (compressed-profiles project)
-          args (cli-with-profiles profiles args)
-          subprocess (get-in project [:modules :subprocess]
-                       (or (System/getenv "LEIN_CMD")
-                         (if (= :windows (utils/get-os)) "lein.bat" "lein")))]
-      (when-not quiet?
-        (print-modules opts modules))
-      (doseq [project modules]
-        (when-not quiet?
-          (print-modules opts modules))
-        (doseq [project modules]
+  (loop [project project
+         args    args]
+    (let [[quiet? args] ((juxt some remove) #{"-q" "--quiet" ":quiet"} args)
+          quiet? (or quiet? (-> project :modules :quiet))
+          modules (or (-> project :modules :modules) (ordered-builds project))
+          {:keys [quiet?] :as opts} {:quiet? (boolean quiet?)}]
+      (condp contains? (first args)
+        #{":checkouts"}
+        (do (checkout-dependencies project)
+            (recur project (remove #{":checkouts"} args)))
+
+        ;; FIXME (reid.mckenzie 2018-02-05):
+        ;;   :dirs is REALLY badly specified and doesn't include transitive deps.
+        ;;   It's not something we use and probably not something that makes sense.
+        #{":dirs"}
+        (let [dirs (s/split (second args) #"[:,]")]
+          (recur (-> project
+                     (assoc-in [:modules :dirs] dirs)
+                     (assoc-in [:modules :quiet] quiet?)
+                     (assoc-in [:modules :modules] modules)
+                     (vary-meta assoc-in [:without-profiles :modules :dirs] dirs))
+                 (drop 2 args)))
+
+        #{":only"}
+        (let [[_only targets & args'] args
+              only (->> (s/split targets #",")
+                        (mapv symbol)
+                        (only project))]
+          (when (empty? only)
+            (binding [*out* *err*]
+              (println "Warning: no targets found for selectors! '%s'" targets)))
+          (recur (-> project
+                     (assoc-in [:modules :quiet] quiet?)
+                     (assoc-in [:modules :modules] only))
+                 args'))
+
+        #{":changed"}
+        (let [[_changed since to & args'] args
+              invalidated (invalidated-builds project since to)]
+          (recur (-> project
+                     (assoc-in [:modules :quiet] quiet?)
+                     (assoc-in [:modules :modules] invalidated))
+                 args'))
+
+        #{":list" nil}
+        (print-modules opts (ordered-builds project))
+
+        (let [profiles (compressed-profiles project)
+              args (cli-with-profiles profiles args)
+              subprocess (get-in project [:modules :subprocess]
+                                 (or (System/getenv "LEIN_CMD")
+                                     (if (= :windows (utils/get-os)) "lein.bat" "lein")))]
           (when-not quiet?
-            (println "------------------------------------------------------------------------")
-            (println " Building" (:name project) (:version project) (dump-profiles args))
-            (println "------------------------------------------------------------------------"))
-          (if-let [cmd (get-in project [:modules :subprocess] subprocess)]
-            (binding [eval/*dir* (:root project)]
-              (let [exit-code (apply eval/sh (cons cmd args))]
-                (when (pos? exit-code)
-                  (throw (ex-info "Subprocess failed" {:exit-code exit-code})))))
-            (let [project (prj/init-project project)
-                  task (main/lookup-alias (first args) project)]
-              (main/apply-task task project (rest args)))))))))
+            (print-modules opts modules))
+          (doseq [project modules]
+            (when-not quiet?
+              (print-modules opts modules))
+            (doseq [project modules]
+              (when-not quiet?
+                (println "------------------------------------------------------------------------")
+                (println " Building" (:name project) (:version project) (dump-profiles args))
+                (println "------------------------------------------------------------------------"))
+              (if-let [cmd (get-in project [:modules :subprocess] subprocess)]
+                (binding [eval/*dir* (:root project)]
+                  (let [exit-code (apply eval/sh (cons cmd args))]
+                    (when (pos? exit-code)
+                      (throw (ex-info "Subprocess failed" {:exit-code exit-code})))))
+                (let [project (prj/init-project project)
+                      task (main/lookup-alias (first args) project)]
+                  (main/apply-task task project (rest args)))))))))))
