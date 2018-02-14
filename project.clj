@@ -1,22 +1,33 @@
-(defproject fundingcircle/lein-modules "0.3.13-SNAPSHOT"
+(defproject fundingcircle/lein-modules "_"
   :description "Similar to Maven multi-module projects, but less sucky"
-  :url "https://github.com/jcrossley3/lein-modules"
+  :url "https://github.com/FundingCircle/lein-modules"
+
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
+
   :eval-in-leiningen true
-  :aliases {"all" ["do" "clean," "test," "install"]}
-  :signing {:gpg-key "92439EF5"}
-  :plugins [[lein-file-replace "0.1.0"]]
+
+  :plugins [[me.arrdem/lein-git-version "2.0.5"]]
+
   :deploy-repositories {"releases" :clojars}
-  :release-tasks
-  [["vcs" "assert-committed"]
-   ["change" "version" "leiningen.release/bump-version" "release"]
 
-   ["file-replace" "README.md" "lein-modules \"" "\"]" "version"]
+  :release-tasks [["vcs" "assert-committed"]
+                  ["vcs" "tag"]
+                  ["deploy"]
+                  ["vcs" "push"]]
 
-   ["vcs" "commit"]
-   ["vcs" "tag"]
-   ["deploy"]
-   ["change" "version" "leiningen.release/bump-version"]
-   ["vcs" "commit"]
-   ["vcs" "push"]])
+  :git-version
+  {:status-to-version
+   (fn [{:keys [tag version branch ahead ahead? dirty?] :as git}]
+     (if (and tag (not ahead?) (not dirty?))
+       (do (assert (re-find #"\d+\.\d+\.\d+" tag)
+                   "Tag is assumed to be a raw SemVer version")
+           tag)
+       (if (and tag (or ahead? dirty?))
+         (let [[_ prefix patch] (re-find #"(\d+\.\d+)\.(\d+)" tag)
+               patch            (Long/parseLong patch)
+               patch+           (inc patch)]
+           (format "%s.%d%s-SNAPSHOT" prefix patch+
+                   (if (not= "master" branch)
+                     (str \- branch) "")))
+         "0.1.0-SNAPSHOT")))})
